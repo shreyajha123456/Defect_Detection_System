@@ -4,9 +4,7 @@ import cv2
 import warnings
 warnings.filterwarnings('ignore')
 
-# Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -15,403 +13,732 @@ from sklearn.preprocessing import StandardScaler
 from skimage.feature import local_binary_pattern, graycomatrix, graycoprops
 from skimage.filters import sobel, gabor
 import matplotlib.pyplot as plt
+import seaborn as sns
 from collections import Counter
 import random
+import joblib
+from tqdm import tqdm
+import pickle
+import hashlib
+import time
+
+print("="*70)
+print(" FABRIC DEFECT DETECTION SYSTEM - COMPLETE TRAINING")
+print("="*70)
 
 # =========================
 # CONFIGURATION
 # =========================
 IMG_SIZE = (128, 128)
-path = r"C:\Users\admin\Downloads\carpet\carpet\test"
 SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 
-# =========================
-# FEATURE EXTRACTION FUNCTIONS
-# =========================
-def extract_texture_features(image):
-    """Extract texture features using LBP, GLCM, and Gabor filters"""
-    features = []
-    
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    
-    # 1. LBP (Local Binary Pattern) features
-    lbp = local_binary_pattern(gray, 24, 3, method='uniform')
-    lbp_hist, _ = np.histogram(lbp.ravel(), bins=np.arange(0, 27), range=(0, 26))
-    lbp_hist = lbp_hist / lbp_hist.sum()
-    features.extend(lbp_hist)
-    
-    # 2. GLCM features
-    glcm = graycomatrix(gray, [1], [0, np.pi/4, np.pi/2, 3*np.pi/4], 256, symmetric=True, normed=True)
-    
-    # Extract GLCM properties
-    contrast = graycoprops(glcm, 'contrast').mean()
-    dissimilarity = graycoprops(glcm, 'dissimilarity').mean()
-    homogeneity = graycoprops(glcm, 'homogeneity').mean()
-    energy = graycoprops(glcm, 'energy').mean()
-    correlation = graycoprops(glcm, 'correlation').mean()
-    
-    features.extend([contrast, dissimilarity, homogeneity, energy, correlation])
-    
-    # 3. Edge features using Sobel
-    edge_sobel = sobel(gray)
-    edge_density = np.mean(edge_sobel)
-    edge_std = np.std(edge_sobel)
-    features.extend([edge_density, edge_std])
-    
-    # 4. Gabor filter features
-    gabor_features = []
-    for theta in [0, np.pi/4, np.pi/2, 3*np.pi/4]:
-        for frequency in [0.1, 0.3, 0.5]:
-            gabor_real, gabor_imag = gabor(gray, frequency=frequency, theta=theta)
-            gabor_features.append(np.mean(gabor_real))
-            gabor_features.append(np.std(gabor_real))
-    
-    features.extend(gabor_features[:10])  # Take first 10 to avoid too many features
-    
-    # 5. Statistical features
-    features.extend([
-        np.mean(gray),
-        np.std(gray),
-        np.median(gray),
-        np.percentile(gray, 25),
-        np.percentile(gray, 75),
-        np.max(gray) - np.min(gray)  # Range
-    ])
-    
-    return np.array(features)
+# Update this path to your dataset location
+DATASET_PATH = r"C:\Users\admin\Documents\Defect_Dataset"
+CACHE_FILE = "extracted_features_cache.pkl"
 
-def extract_color_features(image):
-    """Extract color-based features"""
-    features = []
-    
-    # Convert to different color spaces
-    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-    lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-    
-    # RGB histograms
-    for i in range(3):
-        hist = cv2.calcHist([image], [i], None, [32], [0, 256])
-        hist = hist / hist.sum()
-        features.extend(hist.flatten()[:16])  # Take first 16 bins
-    
-    # HSV statistics
-    for i in range(3):
-        features.extend([
-            np.mean(hsv[:,:,i]),
-            np.std(hsv[:,:,i]),
-            np.percentile(hsv[:,:,i], 50)
-        ])
-    
-    # LAB statistics
-    for i in range(3):
-        features.extend([
-            np.mean(lab[:,:,i]),
-            np.std(lab[:,:,i])
-        ])
-    
-    return np.array(features)
+print(f"\n📁 Dataset Path: {DATASET_PATH}")
+print(f"💾 Cache File: {CACHE_FILE}")
 
-def extract_defect_features(image):
-    """Extract defect-specific features using morphological operations"""
-    features = []
+# =========================
+# COMPLETE FIXED SEVERITY CALCULATION WITH BETTER DISTRIBUTION
+# =========================
+# =========================
+# COMPLETE FIXED SEVERITY CALCULATION - ALL VARIABLES DEFINED
+# =========================
+def calculate_severity(image):
+    """Calculate defect severity with balanced distribution (0=Low, 1=Medium, 2=High)"""
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image
     
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    
-    # Apply multiple thresholding methods
+    # Multiple thresholding methods
     _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     thresh_adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                            cv2.THRESH_BINARY_INV, 11, 2)
     
     # Combine thresholds
-    combined_thresh = cv2.bitwise_or(thresh_otsu, thresh_adaptive)
+    combined = cv2.bitwise_or(thresh_otsu, thresh_adaptive)
     
-    # Morphological operations to clean up
+    # Clean up noise
     kernel = np.ones((3,3), np.uint8)
-    cleaned = cv2.morphologyEx(combined_thresh, cv2.MORPH_OPEN, kernel)
+    cleaned = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
     
     # Find contours
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # Contour features
+    if not contours:
+        return 0  # No defect
+    
+    # Calculate defect metrics
+    areas = [cv2.contourArea(c) for c in contours]
+    total_area = gray.shape[0] * gray.shape[1]
+    
+    # 1. Area ratio (how much of the image is defect)
+    area_ratio = sum(areas) / total_area
+    
+    # 2. Number of defects penalty (more defects = more severe)
+    num_defects = len(contours)
+    num_defects_penalty = min(num_defects / 20, 0.3)  # Max 30% penalty, 20+ defects = max penalty
+    
+    # 3. Size penalty (larger average defect = more severe)
+    avg_defect_size = np.mean(areas) if areas else 0
+    size_penalty = min(avg_defect_size / 5000, 0.3)  # Max 30% penalty, 5000+ pixels = max penalty
+    
+    # Calculate combined severity score (0 to 1)
+    # area_ratio contributes 60%, defects count 20%, size 20%
+    severity_score = (area_ratio * 0.6) + (num_defects_penalty * 0.2) + (size_penalty * 0.2)
+    
+    # Classify into 3 levels with better distribution
+    if severity_score < 0.15:
+        return 0  # Low severity - small defects
+    elif severity_score < 0.4:
+        return 1  # Medium severity - moderate defects
+    else:
+        return 2  # High severity - severe defects
+# =========================
+# FEATURE EXTRACTION - 89 FIXED FEATURES
+# =========================
+def extract_features_89(image):
+    """
+    Extract exactly 89 features - MUST match UI
+    Features: 9 stats + 16 hist + 16 LBP + 8 GLCM + 6 edge + 12 Gabor + 10 defect + 12 color = 89
+    """
+    features = []
+    
+    # Convert to grayscale if needed
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image
+    
+    # 1. Basic statistical features (9 features)
+    features.extend([
+        np.mean(gray),           # Mean intensity
+        np.std(gray),            # Standard deviation
+        np.median(gray),         # Median intensity
+        np.percentile(gray, 25), # 25th percentile
+        np.percentile(gray, 75), # 75th percentile
+        np.percentile(gray, 90), # 90th percentile
+        np.percentile(gray, 10), # 10th percentile
+        np.max(gray) - np.min(gray),  # Intensity range
+        np.var(gray)             # Variance
+    ])
+    
+    # 2. Histogram features (16 features)
+    hist = cv2.calcHist([gray], [0], None, [16], [0, 256])
+    hist = hist / (hist.sum() + 1e-6)  # Normalize
+    features.extend(hist.flatten())
+    
+    # 3. LBP (Local Binary Pattern) features (16 features)
+    for radius, n_points in [(1, 8), (2, 16)]:
+        lbp = local_binary_pattern(gray, n_points, radius, method='uniform')
+        hist, _ = np.histogram(lbp.ravel(), bins=np.arange(0, n_points + 3), density=True)
+        hist_padded = np.zeros(8)
+        hist_padded[:min(8, len(hist))] = hist[:8]
+        features.extend(hist_padded)
+    
+    # 4. GLCM (Gray Level Co-occurrence Matrix) features (8 features)
+    try:
+        glcm = graycomatrix(gray, [1], [0, np.pi/4, np.pi/2], 256, symmetric=True, normed=True)
+        for prop in ['contrast', 'dissimilarity', 'homogeneity', 'energy']:
+            prop_vals = graycoprops(glcm, prop)
+            features.append(np.mean(prop_vals))
+            features.append(np.std(prop_vals))
+    except:
+        features.extend([0] * 8)
+    
+    # 5. Edge detection features (6 features)
+    edges_sobel = sobel(gray)
+    edges_canny = cv2.Canny(gray, 50, 150)
+    features.extend([
+        np.mean(edges_sobel),                    # Mean edge intensity
+        np.std(edges_sobel),                     # Edge variation
+        np.max(edges_sobel),                     # Maximum edge intensity
+        np.sum(edges_canny > 0) / (gray.shape[0] * gray.shape[1]),  # Edge density
+        np.percentile(edges_sobel, 75),          # 75th percentile
+        np.percentile(edges_sobel, 90)           # 90th percentile
+    ])
+    
+    # 6. Gabor filter features (12 features)
+    gabor_features = []
+    try:
+        for theta in [0, np.pi/4]:
+            for frequency in [0.1, 0.2, 0.3]:
+                gabor_real, _ = gabor(gray, frequency=frequency, theta=theta)
+                gabor_features.append(np.mean(gabor_real))
+                gabor_features.append(np.std(gabor_real))
+    except:
+        pass
+    
+    # Ensure exactly 12 features
+    while len(gabor_features) < 12:
+        gabor_features.append(0)
+    features.extend(gabor_features[:12])
+    
+    # 7. Defect-specific morphological features (10 features)
+    _, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    thresh2 = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+    
+    combined_thresh = cv2.bitwise_or(thresh1, thresh2)
+    kernel = np.ones((3,3), np.uint8)
+    cleaned = cv2.morphologyEx(combined_thresh, cv2.MORPH_OPEN, kernel)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+    
+    contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
     if contours:
         areas = [cv2.contourArea(c) for c in contours]
-        perimeters = [cv2.arcLength(c, True) for c in contours]
-        
         features.extend([
-            len(contours),  # Number of defects
-            np.mean(areas) if areas else 0,
-            np.std(areas) if len(areas) > 1 else 0,
-            np.max(areas) if areas else 0,
-            np.sum(areas),  # Total defect area
-            np.mean(perimeters) if perimeters else 0,
+            min(len(contours), 5),           # Number of defects (capped)
+            np.mean(areas) if areas else 0,   # Average defect area
+            np.std(areas) if len(areas) > 1 else 0,  # Area variation
+            np.max(areas) if areas else 0,    # Maximum defect area
+            np.sum(areas),                    # Total defect area
+            np.sum(areas) / (gray.shape[0] * gray.shape[1])  # Defect area ratio
         ])
-        
-        # Defect area ratio
-        defect_ratio = np.sum(areas) / (gray.shape[0] * gray.shape[1])
-        features.append(defect_ratio)
+        features.extend([0, 0, 0, 0])  # Pad to 10 features
     else:
-        features.extend([0, 0, 0, 0, 0, 0, 0])
+        features.extend([0] * 10)
     
-    # Texture uniformity (variance)
-    features.append(np.var(gray))
+    # 8. Color features (12 features)
+    if len(image.shape) == 3:
+        try:
+            hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+            for channel in range(3):
+                features.extend([
+                    np.mean(hsv[:,:,channel]),      # Mean
+                    np.std(hsv[:,:,channel]),       # Standard deviation
+                    np.median(hsv[:,:,channel]),    # Median
+                    np.percentile(hsv[:,:,channel], 25)  # 25th percentile
+                ])
+        except:
+            features.extend([0] * 12)
+    else:
+        features.extend([0] * 12)
     
-    return np.array(features)
-
-def extract_all_features(image_path):
-    """Extract all features from an image"""
-    try:
-        # Load and preprocess image
-        img = cv2.imread(image_path)
-        if img is None:
-            return None
-        
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img = cv2.resize(img, IMG_SIZE)
-        
-        # Extract feature sets
-        texture_feats = extract_texture_features(img)
-        color_feats = extract_color_features(img)
-        defect_feats = extract_defect_features(img)
-        
-        # Combine all features
-        all_features = np.concatenate([texture_feats, color_feats, defect_feats])
-        
-        return all_features
-    
-    except Exception as e:
-        print(f"Error processing {image_path}: {e}")
-        return None
+    return np.array(features, dtype=np.float32)
 
 # =========================
-# LOAD DATA AND EXTRACT FEATURES
+# LOAD DATASET
 # =========================
-def load_dataset(base_path):
-    """Load dataset and extract features"""
-    good_paths = []
-    defect_paths = []
+def load_dataset(dataset_path):
+    """Load all images from the dataset directory"""
+    images = []
+    labels = []
+    file_paths = []
     
-    # Collect image paths
-    for root, dirs, files in os.walk(base_path):
+    print("\n📂 Scanning dataset directory...")
+    
+    for root, dirs, files in os.walk(dataset_path):
         for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif')):
                 img_path = os.path.join(root, file)
-                if "good" in root.lower():
-                    good_paths.append(img_path)
-                else:
-                    defect_paths.append(img_path)
+                
+                try:
+                    img = cv2.imread(img_path)
+                    if img is None:
+                        continue
+                    
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    img = cv2.resize(img, IMG_SIZE)
+                    
+                    folder_name = os.path.basename(root).lower()
+                    
+                    # Determine label based on folder name
+                    if any(keyword in folder_name for keyword in ['good', 'ok', 'normal', 'defect free', 'ok_image']):
+                        labels.append(0)  # Good
+                    else:
+                        labels.append(1)  # Defect
+                    
+                    images.append(img)
+                    file_paths.append(img_path)
+                    
+                except Exception as e:
+                    print(f"⚠️ Error loading {img_path}: {e}")
+                    continue
     
-    print(f"Found {len(good_paths)} good images")
-    print(f"Found {len(defect_paths)} defect images")
+    return np.array(images), np.array(labels), file_paths
+
+# =========================
+# CREATE SYNTHETIC GOOD IMAGES
+# =========================
+def create_synthetic_good_images(defect_images, num_needed):
+    """Create synthetic good images by processing defect images"""
+    synthetic_good = []
     
-    # Balance dataset (take equal number from each class)
-    min_count = min(len(good_paths), len(defect_paths))
-    good_paths = random.sample(good_paths, min_count)
-    defect_paths = random.sample(defect_paths, min_count)
+    print("🎨 Creating synthetic good images...")
     
-    print(f"\nUsing {len(good_paths)} images from each class")
+    for i in range(min(num_needed, len(defect_images) * 2)):
+        img = defect_images[i % len(defect_images)].copy()
+        
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img
+        
+        # Apply median blur to smooth out defects
+        smoothed = cv2.medianBlur(gray, 5)
+        
+        # Apply inpainting to remove defects
+        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        inpainted = cv2.inpaint(smoothed, thresh, 3, cv2.INPAINT_TELEA)
+        
+        synthetic_good.append(cv2.cvtColor(inpainted, cv2.COLOR_GRAY2RGB))
+        
+        if len(synthetic_good) >= num_needed:
+            break
+    
+    print(f"✅ Created {len(synthetic_good)} synthetic good images")
+    return synthetic_good[:num_needed]
+
+# =========================
+# GET DATASET HASH FOR CACHE VALIDATION
+# =========================
+def get_dataset_hash():
+    """Generate hash of dataset for cache validation"""
+    if not os.path.exists(DATASET_PATH):
+        return None
+    
+    image_files = []
+    for root, dirs, files in os.walk(DATASET_PATH):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif')):
+                img_path = os.path.join(root, file)
+                if os.path.exists(img_path):
+                    image_files.append((img_path, os.path.getmtime(img_path)))
+    
+    hash_input = str(sorted(image_files))
+    return hashlib.md5(hash_input.encode()).hexdigest()
+
+# =========================
+# MAIN TRAINING PIPELINE
+# =========================
+# Try to load from cache
+cache_valid = False
+if os.path.exists(CACHE_FILE):
+    try:
+        print("\n🔍 Checking cache...")
+        with open(CACHE_FILE, 'rb') as f:
+            cache_data = pickle.load(f)
+        
+        current_hash = get_dataset_hash()
+        if current_hash and cache_data.get('dataset_hash') == current_hash:
+            cache_valid = True
+            print("✅ Found valid cached features! Loading...")
+            X = cache_data['X']
+            y = cache_data['y']
+            severities = cache_data['severities']
+            print(f"📊 Loaded {len(X)} samples from cache")
+            print(f"🔬 Feature dimension: {X.shape[1]}")
+            print(f"📈 Class distribution: {dict(Counter(y))}")
+        else:
+            print("⚠️ Cache is outdated. Extracting features again...")
+    except Exception as e:
+        print(f"⚠️ Error loading cache: {e}")
+
+if not cache_valid:
+    print("\n" + "="*70)
+    print(" STEP 1: LOADING DATASET")
+    print("="*70)
+    
+    # Load dataset
+    X_images, y, file_paths = load_dataset(DATASET_PATH)
+    
+    print(f"\n📊 Dataset Statistics:")
+    print(f"   Total images found: {len(X_images)}")
+    print(f"   Class distribution: {dict(Counter(y))}")
+    
+    if len(X_images) == 0:
+        print("\n❌ No images found! Please check your dataset path.")
+        print(f"   Current path: {DATASET_PATH}")
+        exit()
+    
+    # Handle missing classes
+    if len(np.unique(y)) < 2:
+        print("\n⚠️ Dataset has only one class! Creating synthetic data...")
+        
+        if 0 not in y:  # No good images
+            print("   → No good images found. Creating synthetic good images...")
+            defect_images = X_images[y == 1]
+            num_good_needed = len(defect_images) // 2
+            synthetic_good = create_synthetic_good_images(defect_images, num_good_needed)
+            
+            X_images = np.concatenate([X_images, np.array(synthetic_good)])
+            y = np.concatenate([y, np.zeros(len(synthetic_good))])
+            
+        elif 1 not in y:  # No defect images
+            print("   → No defect images found. Creating synthetic defect images...")
+            good_images = X_images[y == 0]
+            num_defect_needed = len(good_images) // 2
+            
+            synthetic_defect = []
+            for i in range(min(num_defect_needed, len(good_images))):
+                img = good_images[i % len(good_images)].copy()
+                h, w = img.shape[:2]
+                cv2.circle(img, (w//2, h//2), 20, (0, 0, 255), -1)
+                synthetic_defect.append(img)
+            
+            X_images = np.concatenate([X_images, np.array(synthetic_defect)])
+            y = np.concatenate([y, np.ones(len(synthetic_defect))])
+        
+        print(f"   After synthetic creation: {dict(Counter(y))}")
+    
+    # Balance the dataset
+    min_class_count = min(Counter(y).values())
+    print(f"\n⚖️ Balancing dataset to {min_class_count} samples per class...")
+    
+    balanced_X = []
+    balanced_y = []
+    
+    for class_label in np.unique(y):
+        class_indices = np.where(y == class_label)[0]
+        selected_indices = np.random.choice(class_indices, min_class_count, replace=False)
+        balanced_X.extend(X_images[selected_indices])
+        balanced_y.extend(y[selected_indices])
+    
+    X_images = np.array(balanced_X)
+    y = np.array(balanced_y)
+    
+    print(f"   Balanced dataset: {len(X_images)} images")
+    print(f"   Class distribution: {dict(Counter(y))}")
+    
+    # Apply data augmentation
+    print("\n" + "="*70)
+    print(" STEP 2: DATA AUGMENTATION")
+    print("="*70)
+    
+    augmented_X = []
+    augmented_y = []
+    
+    for img, label in tqdm(zip(X_images, y), total=len(X_images), desc="🔄 Augmenting images"):
+        # Add original
+        augmented_X.append(img)
+        augmented_y.append(label)
+        
+        # Add augmented versions for defect images
+        if label == 1:
+            # Horizontal flip
+            augmented_X.append(cv2.flip(img, 1))
+            augmented_y.append(label)
+            
+            # Slight rotation
+            if random.random() > 0.7:
+                angle = random.uniform(-10, 10)
+                h, w = img.shape[:2]
+                M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1)
+                rotated = cv2.warpAffine(img, M, (w, h))
+                augmented_X.append(rotated)
+                augmented_y.append(label)
+    
+    X_images = np.array(augmented_X)
+    y = np.array(augmented_y)
+    
+    print(f"\n📊 After augmentation:")
+    print(f"   Total images: {len(X_images)}")
+    print(f"   Class distribution: {dict(Counter(y))}")
+    
+    # Calculate severities
+    print("\n" + "="*70)
+    print(" STEP 3: CALCULATING SEVERITY LEVELS")
+    print("="*70)
+    
+    severities = []
+    for img, label in tqdm(zip(X_images, y), total=len(X_images), desc="📊 Calculating severity"):
+        if label == 1:
+            severity = calculate_severity(img)
+            severities.append(severity)
+        else:
+            severities.append(0)
+    
+    severities = np.array(severities)
+    
+    print(f"\n📊 Severity distribution (defects only):")
+    sev_dist = Counter(severities[y==1])
+    total_defects = len(severities[y==1])
+    print(f"   Low (0): {sev_dist.get(0, 0)} ({sev_dist.get(0, 0)/total_defects*100:.1f}%)")
+    print(f"   Medium (1): {sev_dist.get(1, 0)} ({sev_dist.get(1, 0)/total_defects*100:.1f}%)")
+    print(f"   High (2): {sev_dist.get(2, 0)} ({sev_dist.get(2, 0)/total_defects*100:.1f}%)")
     
     # Extract features
-    features = []
-    labels = []
+    print("\n" + "="*70)
+    print(" STEP 4: EXTRACTING FEATURES (89 DIMENSIONS)")
+    print("="*70)
     
-    print("\nExtracting features from good images...")
-    for img_path in good_paths:
-        feats = extract_all_features(img_path)
-        if feats is not None:
-            features.append(feats)
-            labels.append(0)
+    features_list = []
+    for img in tqdm(X_images, desc="🔬 Extracting features"):
+        feats = extract_features_89(img)
+        features_list.append(feats)
     
-    print("Extracting features from defect images...")
-    for img_path in defect_paths:
-        feats = extract_all_features(img_path)
-        if feats is not None:
-            features.append(feats)
-            labels.append(1)
+    X = np.array(features_list, dtype=np.float32)
+    print(f"\n✅ Feature extraction complete!")
+    print(f"   Feature vector dimension: {X.shape[1]} (should be 89)")
     
-    return np.array(features), np.array(labels), good_paths, defect_paths
-
-# Load and extract features
-print("="*50)
-print("Loading dataset and extracting features...")
-print("="*50)
-
-X, y, good_paths, defect_paths = load_dataset(path)
-
-print(f"\nTotal samples: {len(X)}")
-print(f"Feature dimension: {X.shape[1]}")
-print(f"Class distribution: {dict(Counter(y))}")
-
-# Check for NaN or infinite values
-print(f"\nChecking for invalid values...")
-print(f"NaN values: {np.isnan(X).sum()}")
-print(f"Infinite values: {np.isinf(X).sum()}")
-
-# Replace NaN and infinite values
-X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
-
-# =========================
-# TRAIN RANDOM FOREST
-# =========================
-print("\n" + "="*50)
-print("Training Random Forest Classifier...")
-print("="*50)
+    # Save to cache
+    cache_data = {
+        'dataset_hash': get_dataset_hash(),
+        'X': X,
+        'y': y,
+        'severities': severities,
+        'num_samples': len(X),
+        'feature_dim': X.shape[1]
+    }
+    
+    with open(CACHE_FILE, 'wb') as f:
+        pickle.dump(cache_data, f)
+    print(f"\n💾 Features cached to {CACHE_FILE}")
 
 # Split data
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=SEED, stratify=y
+print("\n" + "="*70)
+print(" STEP 5: SPLITTING DATA")
+print("="*70)
+
+X_train, X_test, y_train, y_test, sev_train, sev_test = train_test_split(
+    X, y, severities, test_size=0.2, random_state=SEED, stratify=y
 )
 
-print(f"Training samples: {len(X_train)}")
-print(f"Test samples: {len(X_test)}")
+print(f"📊 Training samples: {len(X_train)}")
+print(f"📊 Testing samples: {len(X_test)}")
+print(f"📈 Train distribution: {dict(Counter(y_train))}")
+print(f"📈 Test distribution: {dict(Counter(y_test))}")
 
 # Scale features
+print("\n" + "="*70)
+print(" STEP 6: SCALING FEATURES")
+print("="*70)
+
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
-# Train Random Forest with hyperparameter tuning
-rf = RandomForestClassifier(
+print("✅ Feature scaling completed")
+
+# =========================
+# TRAIN BINARY CLASSIFIER
+# =========================
+print("\n" + "="*70)
+print(" STEP 7: TRAINING BINARY CLASSIFIER")
+print("="*70)
+
+binary_model = RandomForestClassifier(
     n_estimators=200,
     max_depth=15,
     min_samples_split=5,
     min_samples_leaf=2,
-    max_features='sqrt',
     class_weight='balanced',
     random_state=SEED,
-    n_jobs=-1
+    n_jobs=-1,
+    verbose=0
 )
 
-# Train
-rf.fit(X_train_scaled, y_train)
+print("🏋️ Training Random Forest classifier...")
+binary_model.fit(X_train_scaled, y_train)
 
 # Cross-validation
-cv_scores = cross_val_score(rf, X_train_scaled, y_train, cv=5)
-print(f"\nCross-validation scores: {cv_scores}")
-print(f"Mean CV accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+print("\n📊 Performing cross-validation...")
+cv_scores = cross_val_score(binary_model, X_train_scaled, y_train, cv=5)
+print(f"   Cross-validation scores: {cv_scores}")
+print(f"   Mean CV accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
 
-# Predictions
-y_pred_train = rf.predict(X_train_scaled)
-y_pred_test = rf.predict(X_test_scaled)
+# Evaluation
+print("\n" + "="*70)
+print(" STEP 8: EVALUATING BINARY CLASSIFIER")
+print("="*70)
 
-# Training accuracy
-train_accuracy = accuracy_score(y_train, y_pred_train)
-print(f"\nTraining Accuracy: {train_accuracy:.4f}")
+y_pred = binary_model.predict(X_test_scaled)
+accuracy = accuracy_score(y_test, y_pred)
+print(f"\n🎯 Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
 
-# Test accuracy
-test_accuracy = accuracy_score(y_test, y_pred_test)
-print(f"Test Accuracy: {test_accuracy:.4f}")
+print("\n📋 Classification Report:")
+print(classification_report(y_test, y_pred, target_names=['Good', 'Defect']))
 
-# Detailed metrics
-print("\n" + "="*50)
-print("Classification Report (Test Set):")
-print("="*50)
-print(classification_report(y_test, y_pred_test, target_names=['Good', 'Defect']))
-
-# Confusion Matrix
-cm = confusion_matrix(y_test, y_pred_test)
-print("\nConfusion Matrix:")
+cm = confusion_matrix(y_test, y_pred)
+print(f"\n📊 Confusion Matrix:")
 print(cm)
 
 tn, fp, fn, tp = cm.ravel()
-print(f"\nDetailed Metrics:")
-print(f"True Negatives (Good correctly identified): {tn}")
-print(f"False Positives (Good identified as Defect): {fp}")
-print(f"False Negatives (Defect identified as Good): {fn}")
-print(f"True Positives (Defect correctly identified): {tp}")
-print(f"Good Class Accuracy: {tn/(tn+fp)*100:.2f}%" if (tn+fp) > 0 else "N/A")
-print(f"Defect Class Accuracy: {tp/(tp+fn)*100:.2f}%")
-print(f"Overall Accuracy: {(tn+tp)/(tn+tp+fn+fp)*100:.2f}%")
-
-# Feature importance
-feature_importance = rf.feature_importances_
-print(f"\nTop 10 most important features:")
-top_indices = np.argsort(feature_importance)[-10:][::-1]
-for i, idx in enumerate(top_indices):
-    print(f"  {i+1}. Feature {idx}: {feature_importance[idx]:.4f}")
+print(f"\n📈 Detailed Metrics:")
+print(f"   ✅ Good correctly identified: {tn}")
+print(f"   ❌ Good misidentified as defect: {fp}")
+print(f"   ❌ Defect misidentified as good: {fn}")
+print(f"   ✅ Defect correctly identified: {tp}")
+print(f"   Good Class Accuracy: {tn/(tn+fp)*100:.2f}%" if (tn+fp) > 0 else "N/A")
+print(f"   Defect Class Accuracy: {tp/(tp+fn)*100:.2f}%")
 
 # =========================
-# SAVE MODEL
+# TRAIN SEVERITY CLASSIFIER
 # =========================
-import joblib
-joblib.dump(rf, 'carpet_defect_rf_model.pkl')
+print("\n" + "="*70)
+print(" STEP 9: TRAINING SEVERITY CLASSIFIER")
+print("="*70)
+
+severity_model = None
+
+defect_train_idx = y_train == 1
+X_defect_train = X_train_scaled[defect_train_idx]
+sev_train_defect = sev_train[defect_train_idx]
+
+print(f"📊 Defect samples for severity training: {len(X_defect_train)}")
+print(f"📈 Severity distribution in training: {dict(Counter(sev_train_defect))}")
+
+if len(X_defect_train) > 0 and len(np.unique(sev_train_defect)) >= 2:
+    print("🏋️ Training severity classifier...")
+    
+    severity_model = RandomForestClassifier(
+        n_estimators=150,
+        max_depth=12,
+        min_samples_split=5,
+        min_samples_leaf=2,
+        class_weight='balanced',
+        random_state=SEED,
+        n_jobs=-1
+    )
+    
+    severity_model.fit(X_defect_train, sev_train_defect)
+    
+    # Evaluate severity
+    defect_test_idx = y_test == 1
+    X_defect_test = X_test_scaled[defect_test_idx]
+    sev_test_defect = sev_test[defect_test_idx]
+    
+    if len(X_defect_test) > 0:
+        sev_pred = severity_model.predict(X_defect_test)
+        sev_accuracy = accuracy_score(sev_test_defect, sev_pred)
+        print(f"\n🎯 Severity Classification Accuracy: {sev_accuracy:.4f} ({sev_accuracy*100:.2f}%)")
+        
+        print("\n📋 Severity Classification Report:")
+        print(classification_report(sev_test_defect, sev_pred, 
+                                   target_names=['Low', 'Medium', 'High']))
+    else:
+        print("⚠️ No defect samples in test set for severity evaluation")
+else:
+    print("⚠️ Insufficient data for severity classification")
+
+# =========================
+# SAVE MODELS
+# =========================
+print("\n" + "="*70)
+print(" STEP 10: SAVING MODELS")
+print("="*70)
+
+joblib.dump(binary_model, 'binary_classifier.pkl')
+print("✅ Binary classifier saved as 'binary_classifier.pkl'")
+
+if severity_model:
+    joblib.dump(severity_model, 'severity_classifier.pkl')
+    print("✅ Severity classifier saved as 'severity_classifier.pkl'")
+else:
+    print("⚠️ Severity classifier not saved (insufficient data)")
+
 joblib.dump(scaler, 'feature_scaler.pkl')
-print("\n✅ Random Forest model saved as 'carpet_defect_rf_model.pkl'")
-print("✅ Scaler saved as 'feature_scaler.pkl'")
+print("✅ Feature scaler saved as 'feature_scaler.pkl'")
 
 # =========================
-# PREDICTION FUNCTION
+# FEATURE IMPORTANCE
 # =========================
-def predict_defect(image_path, model, scaler):
-    """Predict defect using trained model"""
-    features = extract_all_features(image_path)
-    if features is None:
-        return "Error: Could not process image", 0.0
-    
-    features = np.nan_to_num(features.reshape(1, -1), nan=0.0, posinf=0.0, neginf=0.0)
-    features_scaled = scaler.transform(features)
-    
-    prediction = model.predict(features_scaled)[0]
-    probability = model.predict_proba(features_scaled)[0]
-    
-    result = "Defect" if prediction == 1 else "Good"
-    confidence = max(probability)
-    
-    return result, confidence
+print("\n" + "="*70)
+print(" STEP 11: FEATURE IMPORTANCE ANALYSIS")
+print("="*70)
 
-# Test on sample images
-print("\n" + "="*50)
-print("Sample Predictions on Test Set:")
-print("="*50)
+importances = binary_model.feature_importances_
+top_indices = np.argsort(importances)[-10:][::-1]
 
-# Get some test images
-test_good_paths = [good_paths[i] for i in range(min(3, len(good_paths)))]
-test_defect_paths = [defect_paths[i] for i in range(min(3, len(defect_paths)))]
-
-print("\nTesting Good Images:")
-for img_path in test_good_paths:
-    pred, conf = predict_defect(img_path, rf, scaler)
-    print(f"  {os.path.basename(img_path)}: {pred} (confidence: {conf:.2%})")
-
-print("\nTesting Defect Images:")
-for img_path in test_defect_paths:
-    pred, conf = predict_defect(img_path, rf, scaler)
-    print(f"  {os.path.basename(img_path)}: {pred} (confidence: {conf:.2%})")
+print("🏆 Top 10 most important features:")
+for i, idx in enumerate(top_indices, 1):
+    print(f"   {i}. Feature {idx}: {importances[idx]:.6f}")
 
 # =========================
 # VISUALIZATION
 # =========================
-# Plot confusion matrix
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+print("\n" + "="*70)
+print(" STEP 12: GENERATING VISUALIZATIONS")
+print("="*70)
 
-# Confusion matrix heatmap
-im = axes[0].imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-axes[0].set_title('Confusion Matrix')
-axes[0].set_xlabel('Predicted')
-axes[0].set_ylabel('True')
-axes[0].set_xticks([0, 1])
-axes[0].set_yticks([0, 1])
-axes[0].set_xticklabels(['Good', 'Defect'])
-axes[0].set_yticklabels(['Good', 'Defect'])
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
 
-# Add text annotations
-for i in range(2):
-    for j in range(2):
-        axes[0].text(j, i, str(cm[i, j]), ha='center', va='center', color='white' if cm[i, j] > cm.max()/2 else 'black')
+# 1. Confusion Matrix
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[0, 0],
+            xticklabels=['Good', 'Defect'], yticklabels=['Good', 'Defect'])
+axes[0, 0].set_title('Binary Classification Confusion Matrix', fontsize=12, fontweight='bold')
+axes[0, 0].set_xlabel('Predicted')
+axes[0, 0].set_ylabel('Actual')
 
-# Feature importance bar chart
-top_features = feature_importance[top_indices]
-axes[1].barh(range(len(top_features)), top_features)
-axes[1].set_title('Top 10 Feature Importances')
-axes[1].set_xlabel('Importance')
-axes[1].set_ylabel('Feature Index')
+# 2. Feature Importance
+axes[0, 1].barh(range(10), importances[top_indices])
+axes[0, 1].set_title('Top 10 Feature Importances', fontsize=12, fontweight='bold')
+axes[0, 1].set_xlabel('Importance')
+axes[0, 1].set_ylabel('Feature Index')
 
+# 3. Class Distribution
+class_dist = Counter(y)
+colors = ['#2ecc71', '#e74c3c']
+bars = axes[1, 0].bar(class_dist.keys(), class_dist.values(), color=colors)
+axes[1, 0].set_title('Final Class Distribution', fontsize=12, fontweight='bold')
+axes[1, 0].set_xlabel('Class')
+axes[1, 0].set_ylabel('Count')
+axes[1, 0].set_xticks([0, 1])
+axes[1, 0].set_xticklabels(['Good', 'Defect'])
+for bar, count in zip(bars, class_dist.values()):
+    axes[1, 0].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 5,
+                    f'{count}', ha='center', va='bottom', fontweight='bold')
+
+# 4. Severity Distribution
+if severity_model and 'sev_test_defect' in locals() and len(sev_test_defect) > 0:
+    sev_dist_test = Counter(sev_test_defect)
+    colors_sev = ['#2ecc71', '#f39c12', '#e74c3c']
+    bars_sev = axes[1, 1].bar(sev_dist_test.keys(), sev_dist_test.values(), color=colors_sev)
+    axes[1, 1].set_title('Severity Distribution in Test Set', fontsize=12, fontweight='bold')
+    axes[1, 1].set_xlabel('Severity Level')
+    axes[1, 1].set_ylabel('Count')
+    axes[1, 1].set_xticks([0, 1, 2])
+    axes[1, 1].set_xticklabels(['Low', 'Medium', 'High'])
+    for bar, count in zip(bars_sev, sev_dist_test.values()):
+        axes[1, 1].text(bar.get_x() + bar.get_width()/2., bar.get_height() + 0.5,
+                        f'{count}', ha='center', va='bottom', fontweight='bold')
+else:
+    axes[1, 1].text(0.5, 0.5, 'Severity Data Not Available\n(Insufficient defect samples)',
+                   ha='center', va='center', transform=axes[1, 1].transAxes,
+                   fontsize=12, style='italic')
+    axes[1, 1].set_title('Severity Distribution', fontsize=12, fontweight='bold')
+
+plt.suptitle('Fabric Defect Detection System - Training Results', fontsize=16, fontweight='bold', y=1.02)
 plt.tight_layout()
-plt.savefig('rf_confusion_matrix.png', dpi=300, bbox_inches='tight')
+plt.savefig('training_results.png', dpi=300, bbox_inches='tight')
 plt.show()
 
-print("\n✅ Training complete! The model is now ready for use.")
-print(f"Expected accuracy: {test_accuracy*100:.1f}%")
+print("✅ Visualization saved as 'training_results.png'")
+
+# =========================
+# FINAL SUMMARY
+# =========================
+print("\n" + "="*70)
+print(" ✅ TRAINING COMPLETE!")
+print("="*70)
+print(f"\n📊 Final Results:")
+print(f"   ✅ Binary Classification Accuracy: {accuracy:.2%}")
+print(f"   📈 Cross-validation Score: {cv_scores.mean():.2%}")
+print(f"   📊 Total Training Samples: {len(X_train)}")
+print(f"   🔬 Features Extracted: {X.shape[1]}")
+
+if severity_model and 'sev_accuracy' in locals():
+    print(f"   🎯 Severity Classification Accuracy: {sev_accuracy:.2%}")
+
+print("\n📁 Saved Files:")
+print("   📄 binary_classifier.pkl - Binary classification model")
+if severity_model:
+    print("   📄 severity_classifier.pkl - Severity classification model")
+print("   📄 feature_scaler.pkl - Feature scaling model")
+print(f"   📄 {CACHE_FILE} - Cached features (for faster loading)")
+print("   📄 training_results.png - Visualization of results")
+
+print("\n💡 Next Steps:")
+print("   1. Run the Streamlit UI: streamlit run complete_ui.py")
+print("   2. Upload images for defect detection")
+print("   3. Test with video files")
+print("   4. Use live camera for real-time detection")
+
+print("\n" + "="*70)
