@@ -43,62 +43,107 @@ print(f"💾 Cache File: {CACHE_FILE}")
 
 # =========================
 # COMPLETE FIXED SEVERITY CALCULATION WITH BETTER DISTRIBUTION
-# =========================
-# =========================
-# COMPLETE FIXED SEVERITY CALCULATION - ALL VARIABLES DEFINED
-# =========================
 def calculate_severity(image):
-    """Calculate defect severity with balanced distribution (0=Low, 1=Medium, 2=High)"""
+    """Severity based on gradient magnitude (color-invariant)"""
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = image
+
+    # 1. Compute gradient (edge map) – ignores absolute color
+    grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gradient = np.sqrt(grad_x**2 + grad_y**2)
+    gradient = (gradient - gradient.min()) / (gradient.max() - gradient.min() + 1e-6) * 255
+    gradient = gradient.astype(np.uint8)
+
+    # 2. Threshold on gradient (not on gray)
+    _, thresh_otsu = cv2.threshold(gradient, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    thresh_adaptive = cv2.adaptiveThreshold(gradient, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY_INV, 11, 2)
+
+    combined = cv2.bitwise_or(thresh_otsu, thresh_adaptive)
+    kernel = np.ones((3,3), np.uint8)
+    cleaned = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
+    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return 0
+
+    areas = [cv2.contourArea(c) for c in contours]
+    total_area = gray.shape[0] * gray.shape[1]
+    area_ratio = sum(areas) / total_area
+    num_defects = len(contours)
+    num_defects_penalty = min(num_defects / 20, 0.3)
+    avg_defect_size = np.mean(areas) if areas else 0
+    size_penalty = min(avg_defect_size / 5000, 0.3)
+
+    severity_score = (area_ratio * 0.6) + (num_defects_penalty * 0.2) + (size_penalty * 0.2)
+
+    if severity_score < 0.15:
+        return 0
+    elif severity_score < 0.4:
+        return 1
+    else:
+        return 2
+def calculate_severity_color_invariant(image):
+    """Improved version - completely color invariant"""
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     else:
         gray = image
     
-    # Multiple thresholding methods
-    _, thresh_otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    thresh_adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+    # Use gradient magnitude (edge detection) - this ignores absolute color values
+    grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gradient = np.sqrt(grad_x**2 + grad_y**2)
+    
+    # Normalize to 0-255
+    gradient = (gradient - gradient.min()) / (gradient.max() - gradient.min() + 1e-6) * 255
+    gradient = gradient.astype(np.uint8)
+    
+    # Apply CLAHE to normalize local contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    gradient_norm = clahe.apply(gradient)
+    
+    # Multiple thresholding methods on gradient
+    _, thresh_otsu = cv2.threshold(gradient_norm, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    thresh_adaptive = cv2.adaptiveThreshold(gradient_norm, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                            cv2.THRESH_BINARY_INV, 11, 2)
     
-    # Combine thresholds
     combined = cv2.bitwise_or(thresh_otsu, thresh_adaptive)
     
-    # Clean up noise
+    # Clean up
     kernel = np.ones((3,3), np.uint8)
     cleaned = cv2.morphologyEx(combined, cv2.MORPH_OPEN, kernel)
     cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
     
-    # Find contours
     contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
     if not contours:
-        return 0  # No defect
+        return 0
     
-    # Calculate defect metrics
+    # Calculate severity based on structural anomalies
     areas = [cv2.contourArea(c) for c in contours]
     total_area = gray.shape[0] * gray.shape[1]
-    
-    # 1. Area ratio (how much of the image is defect)
     area_ratio = sum(areas) / total_area
     
-    # 2. Number of defects penalty (more defects = more severe)
-    num_defects = len(contours)
-    num_defects_penalty = min(num_defects / 20, 0.3)  # Max 30% penalty, 20+ defects = max penalty
+    # Count only significant defects (ignore tiny noise)
+    significant_defects = [a for a in areas if a > 50]
+    num_significant = len(significant_defects)
     
-    # 3. Size penalty (larger average defect = more severe)
-    avg_defect_size = np.mean(areas) if areas else 0
-    size_penalty = min(avg_defect_size / 5000, 0.3)  # Max 30% penalty, 5000+ pixels = max penalty
-    
-    # Calculate combined severity score (0 to 1)
-    # area_ratio contributes 60%, defects count 20%, size 20%
-    severity_score = (area_ratio * 0.6) + (num_defects_penalty * 0.2) + (size_penalty * 0.2)
-    
-    # Classify into 3 levels with better distribution
-    if severity_score < 0.15:
-        return 0  # Low severity - small defects
-    elif severity_score < 0.4:
-        return 1  # Medium severity - moderate defects
+    # Severity based on structural defects
+    if num_significant == 0:
+        return 0
+    elif num_significant <= 3 and area_ratio < 0.1:
+        return 0  # Low
+    elif num_significant <= 6 or area_ratio < 0.25:
+        return 1  # Medium
     else:
-        return 2  # High severity - severe defects
+        return 2  # High
+
+
 # =========================
 # FEATURE EXTRACTION - 89 FIXED FEATURES
 # =========================
@@ -450,7 +495,7 @@ if not cache_valid:
     severities = []
     for img, label in tqdm(zip(X_images, y), total=len(X_images), desc="📊 Calculating severity"):
         if label == 1:
-            severity = calculate_severity(img)
+            severity = calculate_severity_color_invariant(img)
             severities.append(severity)
         else:
             severities.append(0)
@@ -605,20 +650,31 @@ if len(X_defect_train) > 0 and len(np.unique(sev_train_defect)) >= 2:
     X_defect_test = X_test_scaled[defect_test_idx]
     sev_test_defect = sev_test[defect_test_idx]
     
-    if len(X_defect_test) > 0:
-        sev_pred = severity_model.predict(X_defect_test)
-        sev_accuracy = accuracy_score(sev_test_defect, sev_pred)
-        print(f"\n🎯 Severity Classification Accuracy: {sev_accuracy:.4f} ({sev_accuracy*100:.2f}%)")
-        
-        print("\n📋 Severity Classification Report:")
-        print(classification_report(sev_test_defect, sev_pred, 
-                                   target_names=['Low', 'Medium', 'High']))
-    else:
-        print("⚠️ No defect samples in test set for severity evaluation")
+    # Evaluate severity only if we have at least 2 classes in test set
+if len(X_defect_test) > 0 and len(np.unique(sev_test_defect)) >= 2:
+    sev_pred = severity_model.predict(X_defect_test)
+    sev_accuracy = accuracy_score(sev_test_defect, sev_pred)
+    print(f"\n🎯 Severity Classification Accuracy: {sev_accuracy:.4f} ({sev_accuracy*100:.2f}%)")
+    
+    # Get unique classes present in test set
+    unique_classes = np.unique(sev_test_defect)
+    # Create target names only for those classes
+    severity_names = ['Low', 'Medium', 'High']
+    present_names = [severity_names[i] for i in unique_classes]
+    
+    print("\n📋 Severity Classification Report:")
+    print(classification_report(
+        sev_test_defect, 
+        sev_pred,
+        labels=unique_classes,          # Use only classes that actually appear
+        target_names=present_names,     # Match names to those classes
+        zero_division=0
+    ))
 else:
-    print("⚠️ Insufficient data for severity classification")
+    print("⚠️ Not enough severity classes in test set for detailed report")
 
 # =========================
+
 # SAVE MODELS
 # =========================
 print("\n" + "="*70)
