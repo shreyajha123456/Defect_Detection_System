@@ -672,9 +672,7 @@ if len(X_defect_test) > 0 and len(np.unique(sev_test_defect)) >= 2:
     ))
 else:
     print("⚠️ Not enough severity classes in test set for detailed report")
-
 # =========================
-
 # SAVE MODELS
 # =========================
 print("\n" + "="*70)
