@@ -260,7 +260,7 @@ atexit.register(cleanup_temp_files)
 # SIDEBAR
 # =========================
 with st.sidebar:
-    st.image("https://via.placeholder.com/150x150?text=Fabric+AI", use_column_width=True)
+    st.image("https://via.placeholder.com/150x150?text=Fabric+AI", width=150)
     st.title("🎯 Controls")
     
     if st.button("📥 Load Detection Model", use_container_width=True):
