@@ -355,7 +355,7 @@ with tab1:
         
         if uploaded_file:
             image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Fabric", use_column_width=True)
+            st.image(image, caption="Uploaded Fabric", width="stretch")
             
             if st.button("🔍 Analyze Image", key="analyze_image", use_container_width=True):
                 with st.spinner("Analyzing fabric quality..."):
